@@ -5,15 +5,24 @@
  */
 
 import type { Request, Response } from "express";
+import { EventEmitter } from "events";
 import { v4 as uuidv4 } from "uuid";
 import { ClaudeSubprocess } from "../subprocess/manager.js";
-import { openaiToCli } from "../adapter/openai-to-cli.js";
+import { SessionPoolRouter } from "../subprocess/router.js";
+import { openaiToCli, extractModel } from "../adapter/openai-to-cli.js";
 import {
   cliResultToOpenai,
   createDoneChunk,
 } from "../adapter/cli-to-openai.js";
 import type { OpenAIChatRequest, OpenAIToolCall } from "../types/openai.js";
 import type { ClaudeCliAssistant, ClaudeCliResult, ClaudeCliStreamEvent } from "../types/claude-cli.js";
+
+/** Shared pool router — initialized by standalone.ts on startup */
+let poolRouter: SessionPoolRouter | null = null;
+
+export function setPoolRouter(router: SessionPoolRouter): void {
+  poolRouter = router;
+}
 
 /**
  * Handle POST /v1/chat/completions
@@ -43,12 +52,35 @@ export async function handleChatCompletions(
 
     // Convert to CLI input format
     const cliInput = openaiToCli(body);
-    const subprocess = new ClaudeSubprocess();
+    const sessionKey = (req.headers["x-openclaw-session-key"] as string | undefined) || null;
+    const startMs = Date.now();
+
+    let emitter: EventEmitter;
+    let cacheHit: "locked" | "warm" | "cold" | "fallback" | "subprocess" = "subprocess";
+
+    if (poolRouter && sessionKey) {
+      // Pool routing
+      const modelAlias = extractModel(body.model || "opus");
+      emitter = poolRouter.execute(cliInput.prompt, modelAlias, sessionKey);
+      cacheHit = "locked"; // actual hit type tracked inside router stats
+      console.log(`[Route] pool sessionKey=${sessionKey} model=${modelAlias}`);
+    } else {
+      // Fallback: subprocess-per-request
+      const subprocess = new ClaudeSubprocess();
+      subprocess.start(cliInput.prompt, {
+        model: cliInput.model,
+        sessionId: cliInput.sessionId,
+      }).catch((err) => subprocess.emit("error", err));
+      emitter = subprocess;
+      console.log(`[Route] subprocess (no sessionKey or no pool) model=${cliInput.model}`);
+    }
+
+    const pid = (emitter as any).pid ?? "n/a";
 
     if (stream) {
-      await handleStreamingResponse(req, res, subprocess, cliInput, requestId);
+      await handleStreamingResponse(req, res, emitter, cliInput, requestId, sessionKey, pid, startMs);
     } else {
-      await handleNonStreamingResponse(res, subprocess, cliInput, requestId);
+      await handleNonStreamingResponse(res, emitter, cliInput, requestId);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -84,9 +116,12 @@ function toOpenAICallId(claudeId: string): string {
 async function handleStreamingResponse(
   req: Request,
   res: Response,
-  subprocess: ClaudeSubprocess,
+  emitter: EventEmitter,
   cliInput: ReturnType<typeof openaiToCli>,
-  requestId: string
+  requestId: string,
+  sessionKey: string | null = null,
+  processPid: string | number = "n/a",
+  startMs: number = Date.now()
 ): Promise<void> {
   // Set SSE headers
   res.setHeader("Content-Type", "text/event-stream");
@@ -108,19 +143,26 @@ async function handleStreamingResponse(
     let hasEmittedText = false;
     let toolCallIndex = 0;
     let inToolBlock = false;
+    let clientDisconnected = false;
 
     // Handle actual client disconnect (response stream closed)
     res.on("close", () => {
+      clientDisconnected = true;
       if (!isComplete) {
-        // Client disconnected before response completed - kill subprocess
-        subprocess.kill();
+        if (sessionKey && poolRouter) {
+          // Pooled process: detach emitter — let process finish, return to idle
+          emitter.removeAllListeners();
+        } else if ((emitter as any).kill) {
+          // Subprocess fallback: kill it
+          (emitter as any).kill();
+        }
       }
       resolve();
     });
 
     // When a new text content block starts after we've already emitted text,
     // insert a separator so text from different blocks doesn't run together
-    subprocess.on("text_block_start", () => {
+    emitter.on("text_block_start", () => {
       if (hasEmittedText && !res.writableEnded) {
         const sepChunk = {
           id: `chatcmpl-${requestId}`,
@@ -140,7 +182,7 @@ async function handleStreamingResponse(
     });
 
     // Handle streaming content deltas
-    subprocess.on("content_delta", (event: ClaudeCliStreamEvent) => {
+    emitter.on("content_delta", (event: ClaudeCliStreamEvent) => {
       const delta = event.event.delta;
       const text = (delta?.type === "text_delta" && delta.text) || "";
       if (text && !res.writableEnded) {
@@ -236,14 +278,15 @@ async function handleStreamingResponse(
     // });
 
     // Handle final assistant message (for model name)
-    subprocess.on("assistant", (message: ClaudeCliAssistant) => {
-      lastModel = message.message.model;
+    emitter.on("assistant", (message: ClaudeCliAssistant) => {
+      lastModel = message.message?.model || lastModel;
     });
 
-    subprocess.on("result", (result: ClaudeCliResult) => {
+    emitter.on("result", (result: ClaudeCliResult) => {
       isComplete = true;
-      if (!res.writableEnded) {
-        // Send final done chunk with finish_reason and usage data
+      const latencyMs = Date.now() - startMs;
+      console.log(`[Route] result sessionKey=${sessionKey ?? "none"} model=${cliInput.model} pid=${processPid} latencyMs=${latencyMs}`);
+      if (!clientDisconnected && !res.writableEnded) {
         const doneChunk = createDoneChunk(requestId, lastModel);
         if (result.usage) {
           doneChunk.usage = {
@@ -260,9 +303,9 @@ async function handleStreamingResponse(
       resolve();
     });
 
-    subprocess.on("error", (error: Error) => {
+    emitter.on("error", (error: Error) => {
       console.error("[Streaming] Error:", error.message);
-      if (!res.writableEnded) {
+      if (!clientDisconnected && !res.writableEnded) {
         res.write(
           `data: ${JSON.stringify({
             error: { message: error.message, type: "server_error", code: null },
@@ -273,11 +316,9 @@ async function handleStreamingResponse(
       resolve();
     });
 
-    subprocess.on("close", (code: number | null) => {
-      // Subprocess exited - ensure response is closed
-      if (!res.writableEnded) {
+    emitter.on("close", (code: number | null) => {
+      if (!clientDisconnected && !res.writableEnded) {
         if (code !== 0 && !isComplete) {
-          // Abnormal exit without result - send error
           res.write(`data: ${JSON.stringify({
             error: { message: `Process exited with code ${code}`, type: "server_error", code: null },
           })}\n\n`);
@@ -287,15 +328,6 @@ async function handleStreamingResponse(
       }
       resolve();
     });
-
-    // Start the subprocess
-    subprocess.start(cliInput.prompt, {
-      model: cliInput.model,
-      sessionId: cliInput.sessionId,
-    }).catch((err) => {
-      console.error("[Streaming] Subprocess start error:", err);
-      reject(err);
-    });
   });
 }
 
@@ -304,47 +336,32 @@ async function handleStreamingResponse(
  */
 async function handleNonStreamingResponse(
   res: Response,
-  subprocess: ClaudeSubprocess,
+  emitter: EventEmitter,
   cliInput: ReturnType<typeof openaiToCli>,
   requestId: string
 ): Promise<void> {
   return new Promise((resolve) => {
     let finalResult: ClaudeCliResult | null = null;
-    // DISABLED: see tool call forwarding comment in handleStreamingResponse
-    // const accumulatedToolCalls: OpenAIToolCall[] = [];
-    //
-    // subprocess.on("assistant", (message: ClaudeCliAssistant) => {
-    //   for (const block of message.message.content) {
-    //     if (block.type === "tool_use") {
-    //       accumulatedToolCalls.push({
-    //         id: toOpenAICallId(block.id),
-    //         type: "function",
-    //         function: {
-    //           name: block.name,
-    //           arguments: JSON.stringify(block.input),
-    //         },
-    //       });
-    //     }
-    //   }
-    // });
 
-    subprocess.on("result", (result: ClaudeCliResult) => {
+    emitter.on("result", (result: ClaudeCliResult) => {
       finalResult = result;
     });
 
-    subprocess.on("error", (error: Error) => {
+    emitter.on("error", (error: Error) => {
       console.error("[NonStreaming] Error:", error.message);
-      res.status(500).json({
-        error: {
-          message: error.message,
-          type: "server_error",
-          code: null,
-        },
-      });
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: {
+            message: error.message,
+            type: "server_error",
+            code: null,
+          },
+        });
+      }
       resolve();
     });
 
-    subprocess.on("close", (code: number | null) => {
+    emitter.on("close", (code: number | null) => {
       if (finalResult) {
         res.json(cliResultToOpenai(finalResult, requestId));
       } else if (!res.headersSent) {
@@ -358,23 +375,6 @@ async function handleNonStreamingResponse(
       }
       resolve();
     });
-
-    // Start the subprocess
-    subprocess
-      .start(cliInput.prompt, {
-        model: cliInput.model,
-        sessionId: cliInput.sessionId,
-      })
-      .catch((error) => {
-        res.status(500).json({
-          error: {
-            message: error.message,
-            type: "server_error",
-            code: null,
-          },
-        });
-        resolve();
-      });
   });
 }
 
@@ -411,9 +411,13 @@ export function handleModels(_req: Request, res: Response): void {
  * Health check endpoint
  */
 export function handleHealth(_req: Request, res: Response): void {
-  res.json({
+  const response: Record<string, unknown> = {
     status: "ok",
     provider: "claude-code-cli",
     timestamp: new Date().toISOString(),
-  });
+  };
+  if (poolRouter) {
+    response.pool = poolRouter.stats();
+  }
+  res.json(response);
 }
