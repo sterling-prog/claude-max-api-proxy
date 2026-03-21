@@ -1,42 +1,50 @@
 #!/usr/bin/env node
 /**
- * Standalone server — session-pooled Claude Max API proxy
+ * Standalone server with session-aware process pooling
+ *
+ * Initializes the SessionPoolRouter, schedules the nightly sweep,
+ * and owns the full graceful-shutdown sequence.
  *
  * Usage:
  *   npm run start
  *   node dist/server/standalone.js [port]
- *
- * Environment variables:
- *   POOL_OPUS_SIZE              Warm opus processes (default: 6)
- *   POOL_SONNET_SIZE            Warm sonnet processes (default: 4)
- *   POOL_MAX_REQUESTS_PER_PROCESS  Context accumulation threshold (default: 50)
- *   MAX_TOTAL_PROCESSES         Hard cap on locked + warm processes (default: 30)
- *   SWEEP_HOUR                  Hour in ET for nightly sweep (default: 3)
- *   SWEEP_IDLE_THRESHOLD_MS     Idle time before sweep recycles (default: 7200000)
- *   POOL_REQUEST_QUEUE_DEPTH    Per-process queue depth (default: 3)
- *   POOL_REQUEST_TIMEOUT_MS     Per-request timeout ms (default: 300000)
  */
 
 import cron from "node-cron";
 import { startServer } from "./index.js";
-import { verifyClaude, verifyAuth } from "../subprocess/manager.js";
-import { SessionPoolRouter } from "../subprocess/router.js";
 import { setPoolRouter } from "./routes.js";
-import type { RouterConfig } from "../subprocess/router.js";
+import { SessionPoolRouter } from "../subprocess/router.js";
+import { verifyClaude, verifyAuth } from "../subprocess/manager.js";
+import type { Server } from "http";
+
+// ---------------------------------------------------------------------------
+// Environment configuration
+// ---------------------------------------------------------------------------
 
 const DEFAULT_PORT = 3456;
 
-function parseEnvInt(name: string, defaultVal: number): number {
-  const v = parseInt(process.env[name] || "", 10);
-  return isNaN(v) ? defaultVal : v;
-}
+const env = {
+  port: parseInt(process.env.PORT || process.argv[2] || String(DEFAULT_PORT), 10),
+  opusSize: parseInt(process.env.POOL_OPUS_SIZE || "6", 10),
+  sonnetSize: parseInt(process.env.POOL_SONNET_SIZE || "4", 10),
+  maxRequestsPerProcess: parseInt(process.env.POOL_MAX_REQUESTS_PER_PROCESS || "50", 10),
+  maxTotalProcesses: parseInt(process.env.MAX_TOTAL_PROCESSES || "30", 10),
+  sweepHour: parseInt(process.env.SWEEP_HOUR || "3", 10),
+  sweepIdleThresholdMs: parseInt(process.env.SWEEP_IDLE_THRESHOLD_MS || "7200000", 10),
+  requestQueueDepth: parseInt(process.env.POOL_REQUEST_QUEUE_DEPTH || "3", 10),
+  requestTimeoutMs: parseInt(process.env.POOL_REQUEST_TIMEOUT_MS || "300000", 10),
+};
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  console.log("Claude Code CLI Provider — Session-Pooled Server");
-  console.log("=================================================\n");
+  console.log("Claude Code CLI Provider - Session Pool Server");
+  console.log("===============================================\n");
 
-  const port = parseInt(process.argv[2] || String(DEFAULT_PORT), 10);
-  if (isNaN(port) || port < 1 || port > 65535) {
+  // Validate port
+  if (isNaN(env.port) || env.port < 1 || env.port > 65535) {
     console.error(`Invalid port: ${process.argv[2]}`);
     process.exit(1);
   }
@@ -50,89 +58,113 @@ async function main(): Promise<void> {
   }
   console.log(`  Claude CLI: ${cliCheck.version || "OK"}`);
 
-  // Auth check (warn, don't exit — M1 invariant: server starts even if auth fails at startup)
+  // Verify authentication
   console.log("Checking authentication...");
   const authCheck = await verifyAuth();
   if (!authCheck.ok) {
-    console.warn(`  Warning: ${authCheck.error}`);
-    console.warn("  Run: claude auth login");
-    console.warn("  Server will start but requests will return 401 until authenticated.\n");
-  } else {
-    console.log("  Authentication: OK\n");
+    console.error(`Error: ${authCheck.error}`);
+    console.error("Please run: claude auth login");
+    process.exit(1);
   }
+  console.log("  Authentication: OK\n");
 
-  // Pool configuration
-  const routerConfig: RouterConfig = {
-    opusSize: parseEnvInt("POOL_OPUS_SIZE", 6),
-    sonnetSize: parseEnvInt("POOL_SONNET_SIZE", 4),
-    maxRequestsPerProcess: parseEnvInt("POOL_MAX_REQUESTS_PER_PROCESS", 50),
-    maxTotalProcesses: parseEnvInt("MAX_TOTAL_PROCESSES", 30),
-    sweepIdleThresholdMs: parseEnvInt("SWEEP_IDLE_THRESHOLD_MS", 7_200_000),
-    requestQueueDepth: parseEnvInt("POOL_REQUEST_QUEUE_DEPTH", 3),
-    requestTimeoutMs: parseEnvInt("POOL_REQUEST_TIMEOUT_MS", 300_000),
-  };
-
+  // --- Initialize SessionPoolRouter ---
   console.log("Pool configuration:");
-  console.log(`  POOL_OPUS_SIZE=${routerConfig.opusSize} POOL_SONNET_SIZE=${routerConfig.sonnetSize}`);
-  console.log(`  MAX_TOTAL_PROCESSES=${routerConfig.maxTotalProcesses} POOL_MAX_REQUESTS_PER_PROCESS=${routerConfig.maxRequestsPerProcess}`);
-  console.log(`  POOL_REQUEST_TIMEOUT_MS=${routerConfig.requestTimeoutMs} POOL_REQUEST_QUEUE_DEPTH=${routerConfig.requestQueueDepth}`);
-  console.log(`  SWEEP_IDLE_THRESHOLD_MS=${routerConfig.sweepIdleThresholdMs}\n`);
+  console.log(`  Opus pool size:       ${env.opusSize}`);
+  console.log(`  Sonnet pool size:     ${env.sonnetSize}`);
+  console.log(`  Max total processes:  ${env.maxTotalProcesses}`);
+  console.log(`  Max requests/process: ${env.maxRequestsPerProcess}`);
+  console.log(`  Request queue depth:  ${env.requestQueueDepth}`);
+  console.log(`  Request timeout:      ${env.requestTimeoutMs}ms`);
+  console.log(`  Sweep hour (ET):      ${env.sweepHour}:00`);
+  console.log(`  Sweep idle threshold: ${env.sweepIdleThresholdMs}ms\n`);
 
-  // Initialize session pool router
-  const router = new SessionPoolRouter(routerConfig);
+  const router = new SessionPoolRouter({
+    opusSize: env.opusSize,
+    sonnetSize: env.sonnetSize,
+    maxRequestsPerProcess: env.maxRequestsPerProcess,
+    maxTotalProcesses: env.maxTotalProcesses,
+    requestQueueDepth: env.requestQueueDepth,
+    requestTimeoutMs: env.requestTimeoutMs,
+    sweepIdleThresholdMs: env.sweepIdleThresholdMs,
+  });
+
+  // Register router with routes module
   setPoolRouter(router);
+
+  // Initialize warm pools
   await router.initialize();
 
-  const initialStats = router.stats();
-  console.log(`Pool initialized: warm.opus=${initialStats.warm.opus} warm.sonnet=${initialStats.warm.sonnet} total=${initialStats.total}\n`);
-
-  // Schedule nightly sweep at 3 AM ET (DST-aware via node-cron timezone)
-  const sweepHour = parseEnvInt("SWEEP_HOUR", 3);
-  cron.schedule(`0 ${sweepHour} * * *`, () => {
-    console.log(`[Cron] Running nightly sweep at ${sweepHour}:00 ET`);
-    router.sweep();
-  }, { timezone: "America/New_York" });
-  console.log(`Nightly sweep scheduled at ${sweepHour}:00 AM ET (DST-aware)\n`);
-
-  // Start HTTP server
-  let httpServer: { close: (cb?: () => void) => void } | null = null;
+  // --- Start HTTP server ---
+  let server: Server;
   try {
-    const result = await startServer({ port });
-    httpServer = (result as any)?.server || null;
-    console.log("\nServer ready. Test with:");
-    console.log(`  curl -X POST http://localhost:${port}/v1/chat/completions \\`);
-    console.log(`    -H "Content-Type: application/json" \\`);
-    console.log(`    -H "x-openclaw-session-key: agent:test:discord:channel:123" \\`);
-    console.log(`    -d '{"model": "claude-sonnet-4", "messages": [{"role": "user", "content": "Hello!"}]}'`);
-    console.log("\nPress Ctrl+C to stop.\n");
+    server = await startServer({ port: env.port });
   } catch (err) {
     console.error("Failed to start server:", err);
     await router.shutdown();
     process.exit(1);
   }
 
-  // Graceful shutdown — per spec Finding N18:
-  // 1. Close listening socket immediately (no new connections)
-  // 2. Wait 30s for in-flight requests
-  // 3. Call router.shutdown()
-  // 4. Exit
-  const shutdown = async (signal: string) => {
-    console.log(`\nReceived ${signal}. Shutting down...`);
+  console.log(`\n[Server] Pool stats: ${JSON.stringify(router.stats())}`);
+  console.log("\nServer ready. Test with:");
+  console.log(
+    `  curl -X POST http://localhost:${env.port}/v1/chat/completions \\`
+  );
+  console.log(`    -H "Content-Type: application/json" \\`);
+  console.log(
+    `    -d '{"model": "claude-sonnet-4", "messages": [{"role": "user", "content": "Hello!"}]}'`
+  );
+  console.log("\nPress Ctrl+C to stop.\n");
 
-    // Step 1: Close listening socket immediately
-    if (httpServer) {
-      httpServer.close(() => {
-        console.log("  HTTP server closed (no new connections accepted)");
+  // --- Schedule nightly sweep ---
+  const sweepJob = cron.schedule(
+    `0 ${env.sweepHour} * * *`,
+    () => {
+      console.log("[Sweep] Nightly sweep triggered");
+      router.sweep().catch((err: unknown) => {
+        console.error("[Sweep] Error:", err);
       });
-    }
+    },
+    { timezone: "America/New_York" }
+  );
 
-    // Step 2: Wait up to 30s for in-flight requests
-    await new Promise<void>((resolve) => setTimeout(resolve, 30_000));
+  // --- Graceful shutdown ---
+  let shutdownInProgress = false;
 
-    // Step 3: Shut down pool — rejects all queued requests, kills processes
+  const shutdown = async (signal: string) => {
+    if (shutdownInProgress) return;
+    shutdownInProgress = true;
+
+    console.log(`\n[Shutdown] ${signal} received — starting graceful shutdown`);
+
+    // 1. Stop the cron job
+    sweepJob.stop();
+
+    // 2. Close listening socket FIRST (stop new connections)
+    console.log("[Shutdown] Closing listening socket...");
+    server.close();
+
+    // 3. Wait for in-flight requests (30s timeout)
+    console.log("[Shutdown] Waiting up to 30s for in-flight requests...");
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        console.log("[Shutdown] 30s timeout reached — forcing shutdown");
+        resolve();
+      }, 30000);
+
+      // Check if all connections are done
+      server.on("close", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+
+    // 4. Shutdown the pool router (rejects queued, kills processes)
+    console.log("[Shutdown] Shutting down pool router...");
     await router.shutdown();
 
-    // Step 4: Exit
+    // 5. Exit
+    console.log("[Shutdown] Complete.");
     process.exit(0);
   };
 
