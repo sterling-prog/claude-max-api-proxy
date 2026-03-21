@@ -73,6 +73,7 @@ export async function handleChatCompletions(
     const sessionKey = req.headers["x-openclaw-session-key"] as
       | string
       | undefined;
+    const agentId = req.headers["x-openclaw-agent-id"] as string | undefined;
 
     // --- Pool routing ---
     if (sessionKey && poolRouter) {
@@ -94,6 +95,7 @@ export async function handleChatCompletions(
             requestId,
             startTime,
             sessionKey,
+            agentId,
             cliInput.model,
             routeType,
             pid,
@@ -106,6 +108,7 @@ export async function handleChatCompletions(
             requestId,
             startTime,
             sessionKey,
+            agentId,
             cliInput.model,
             routeType,
             pid,
@@ -152,6 +155,7 @@ async function handlePooledStreaming(
   requestId: string,
   startTime: number,
   sessionKey: string,
+  agentId: string | undefined,
   model: string,
   routeType: string,
   pid: number | null,
@@ -231,11 +235,13 @@ async function handlePooledStreaming(
           ts: new Date().toISOString(),
           event: "request",
           sessionKey,
+          agentId,
           model,
           pid,
           latencyMs,
           queueDepth,
           routeType,
+          cacheHit: routeType,
           requestCount: result.num_turns,
         })
       );
@@ -318,6 +324,7 @@ async function handlePooledNonStreaming(
   requestId: string,
   startTime: number,
   sessionKey: string,
+  agentId: string | undefined,
   model: string,
   routeType: string,
   pid: number | null,
@@ -331,11 +338,13 @@ async function handlePooledNonStreaming(
           ts: new Date().toISOString(),
           event: "request",
           sessionKey,
+          agentId,
           model,
           pid,
           latencyMs,
           queueDepth,
           routeType,
+          cacheHit: routeType,
           requestCount: result.num_turns,
         })
       );
