@@ -276,7 +276,7 @@ export class SessionPoolRouter {
     // Warm pool empty — need cold spawn
     if (this.allProcesses.size >= this.config.maxTotalProcesses) {
       this.rejectSentinelQueue(sentinel, 503, "Pool at capacity");
-      this.lockedSessions.delete(sessionKey);
+      this.clearSessionLock(sessionKey, null);
       this.routeHits.fallback++;
       console.log(
         JSON.stringify({
@@ -314,7 +314,7 @@ export class SessionPoolRouter {
           })
         );
         this.rejectSentinelQueue(sentinel, 503, "Cold spawn failed");
-        this.lockedSessions.delete(sessionKey);
+        this.clearSessionLock(sessionKey, null);
         emitter.emit("error", new Error(`Cold spawn failed: ${err}`));
       });
 
@@ -807,12 +807,15 @@ export class SessionPoolRouter {
   /**
    * Canonical lock clearing — ALL unlock paths MUST use this method.
    * No inline lockedSessions.delete() anywhere else in the codebase.
+   * Pass null for proc when clearing a PendingSentinel (no process state to reset).
    */
-  private clearSessionLock(sessionKey: string, proc: PooledProcess): void {
+  private clearSessionLock(sessionKey: string, proc: PooledProcess | null): void {
     this.lockedSessions.delete(sessionKey);
-    proc.lockedTo = null;
-    proc.agentChannel = null;
-    proc.requestCount = 0;
+    if (proc) {
+      proc.lockedTo = null;
+      proc.agentChannel = null;
+      proc.requestCount = 0;
+    }
   }
 
   // -------------------------------------------------------------------------
