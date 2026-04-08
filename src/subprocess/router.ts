@@ -15,39 +15,15 @@ import { EventEmitter } from "events";
  * Factory that creates an EventEmitter with a permanent no-op error listener
  * so it never reaches a zero-listener state.  Prevents Node's default throw
  * behavior when callers detach their listeners before an async error fires.
- * Uses a simple counter instead of listenerCount() to avoid zombie emitter crashes.
+ * The permanent listener is attached at creation time — no complex tracking needed.
  */
 function safeEmitter(): EventEmitter {
   const emitter = new EventEmitter();
-  let activeListeners = 0;
-
-  // Track when listeners are added/removed
-  const originalOn = emitter.on.bind(emitter);
-  const originalOff = emitter.off.bind(emitter);
-  const originalRemoveListener = emitter.removeListener.bind(emitter);
-
-  emitter.on = function(type: string, listener: (...args: any[]) => void) {
-    if (type === "error") activeListeners++;
-    return originalOn(type, listener);
-  };
-
-  emitter.off = function(type: string, listener: (...args: any[]) => void) {
-    if (type === "error") activeListeners = Math.max(0, activeListeners - 1);
-    return originalOff(type, listener);
-  };
-
-  emitter.removeListener = function(type: string, listener: (...args: any[]) => void) {
-    if (type === "error") activeListeners = Math.max(0, activeListeners - 1);
-    return originalRemoveListener(type, listener);
-  };
-
-  // Permanent guard listener that logs if no other listeners
-  emitter.prependListener("error", function safeEmitGuard(err: Error) {
-    if (activeListeners <= 1) { // Only our guard listener
-      console.error("[Router] Suppressed error (no active listeners):", err.message);
-    }
+  // Permanent no-op guard: emitter always has ≥1 error listener, so Node never
+  // throws on emit("error", ...) regardless of what callers attach or detach.
+  emitter.on("error", (err: Error) => {
+    console.error("[Router] Suppressed emitter error:", err?.message ?? err);
   });
-
   return emitter;
 }
 
