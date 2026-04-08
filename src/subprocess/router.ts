@@ -434,7 +434,11 @@ export class SessionPoolRouter {
     child.on("error", (err) => {
       console.error(`[Router:${id}] Process error:`, err.message);
       if (pooled.currentEmitter) {
-        pooled.currentEmitter.emit("error", err);
+        if (pooled.currentEmitter.listenerCount("error") > 0) {
+          pooled.currentEmitter.emit("error", err);
+        } else {
+          console.error(`[Router:${pooled.id}] Suppressed error (no listeners):`, err.message);
+        }
         pooled.currentEmitter = null;
       }
     });
@@ -635,12 +639,16 @@ export class SessionPoolRouter {
       this.requestTimeouts++;
 
       if (pooled.currentEmitter) {
-        pooled.currentEmitter.emit(
-          "error",
-          new Error(
-            `Request timed out after ${this.config.requestTimeoutMs}ms`
-          )
-        );
+        if (pooled.currentEmitter.listenerCount("error") > 0) {
+          pooled.currentEmitter.emit(
+            "error",
+            new Error(
+              `Request timed out after ${this.config.requestTimeoutMs}ms`
+            )
+          );
+        } else {
+          console.error(`[Router:${pooled.id}] Suppressed error (no listeners): Request timed out after ${this.config.requestTimeoutMs}ms`);
+        }
         pooled.currentEmitter = null;
       }
 
@@ -892,10 +900,14 @@ export class SessionPoolRouter {
     this.clearRequestTimeout(pooled);
 
     if (pooled.currentEmitter) {
-      pooled.currentEmitter.emit(
-        "error",
-        new Error(`Pool process ${pooled.id} died with code ${code}`)
-      );
+      if (pooled.currentEmitter.listenerCount("error") > 0) {
+        pooled.currentEmitter.emit(
+          "error",
+          new Error(`Pool process ${pooled.id} died with code ${code}`)
+        );
+      } else {
+        console.error(`[Router:${pooled.id}] Suppressed error (no listeners): Pool process ${pooled.id} died with code ${code}`);
+      }
       pooled.currentEmitter = null;
     }
 
@@ -1101,10 +1113,14 @@ export class SessionPoolRouter {
     for (const pooled of this.allProcesses.values()) {
       this.clearRequestTimeout(pooled);
       if (pooled.currentEmitter) {
-        pooled.currentEmitter.emit(
-          "error",
-          new Error("Server shutting down")
-        );
+        if (pooled.currentEmitter.listenerCount("error") > 0) {
+          pooled.currentEmitter.emit(
+            "error",
+            new Error("Server shutting down")
+          );
+        } else {
+          console.error(`[Router:${pooled.id}] Suppressed error (no listeners): Server shutting down`);
+        }
         pooled.currentEmitter = null;
       }
       kills.push(
