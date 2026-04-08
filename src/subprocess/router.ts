@@ -229,10 +229,12 @@ export class SessionPoolRouter {
     if (this.shuttingDown) {
       const emitter = safeEmitter();
       process.nextTick(() => {
-        try {
-          emitter.emit("error", new Error("Server is shutting down"));
-        } catch (err) {
-          console.error(`[Router] Suppressed shutdown error:`, (err as Error).message);
+        if (emitter.listenerCount("error") > 0) {
+          try {
+            emitter.emit("error", new Error("Server is shutting down"));
+          } catch (err) {
+            console.error(`[Router] Suppressed shutdown error:`, (err as Error).message);
+          }
         }
       });
       return { emitter, routeType: "fallback", pid: null, queueDepth: 0 };
@@ -336,10 +338,12 @@ export class SessionPoolRouter {
         );
         this.rejectSentinelQueue(sentinel, 503, "Cold spawn failed");
         this.clearSessionLock(sessionKey, null);
-        try {
-          emitter.emit("error", new Error(`Cold spawn failed: ${err}`));
-        } catch (emitErr) {
-          console.error(`[Router] Failed to emit cold spawn error:`, (emitErr as Error).message);
+        if (emitter.listenerCount("error") > 0) {
+          try {
+            emitter.emit("error", new Error(`Cold spawn failed: ${err}`));
+          } catch (emitErr) {
+            console.error(`[Router] Failed to emit cold spawn error:`, (emitErr as Error).message);
+          }
         }
       });
 
@@ -458,7 +462,7 @@ export class SessionPoolRouter {
 
     child.on("error", (err) => {
       console.error(`[Router:${id}] Process error:`, err.message);
-      if (pooled.currentEmitter) {
+      if (pooled.currentEmitter && pooled.currentEmitter.listenerCount("error") > 0) {
         try {
           pooled.currentEmitter.emit("error", err);
         } catch (emitErr) {
@@ -663,7 +667,7 @@ export class SessionPoolRouter {
       );
       this.requestTimeouts++;
 
-      if (pooled.currentEmitter) {
+      if (pooled.currentEmitter && pooled.currentEmitter.listenerCount("error") > 0) {
         pooled.currentEmitter.emit(
           "error",
           new Error(
@@ -714,15 +718,17 @@ export class SessionPoolRouter {
 
     if (proc.requestQueue.length >= this.config.requestQueueDepth) {
       const emitter = safeEmitter();
-      process.nextTick(() =>
-        emitter.emit(
-          "error",
-          Object.assign(
-            new Error("Too Many Requests — per-session queue full"),
-            { statusCode: 429, retryAfter: 5 }
-          )
-        )
-      );
+      process.nextTick(() => {
+        if (emitter.listenerCount("error") > 0) {
+          emitter.emit(
+            "error",
+            Object.assign(
+              new Error("Too Many Requests — per-session queue full"),
+              { statusCode: 429, retryAfter: 5 }
+            )
+          );
+        }
+      });
       return {
         emitter,
         routeType: "locked",
@@ -755,15 +761,17 @@ export class SessionPoolRouter {
   ): ExecuteResult | null {
     if (sentinel.requestQueue.length >= this.config.requestQueueDepth) {
       const emitter = safeEmitter();
-      process.nextTick(() =>
-        emitter.emit(
-          "error",
-          Object.assign(
-            new Error("Too Many Requests — per-session queue full"),
-            { statusCode: 429, retryAfter: 5 }
-          )
-        )
-      );
+      process.nextTick(() => {
+        if (emitter.listenerCount("error") > 0) {
+          emitter.emit(
+            "error",
+            Object.assign(
+              new Error("Too Many Requests — per-session queue full"),
+              { statusCode: 429, retryAfter: 5 }
+            )
+          );
+        }
+      });
       return {
         emitter,
         routeType: "locked",
@@ -799,23 +807,27 @@ export class SessionPoolRouter {
     message: string
   ): void {
     for (const pending of sentinel.requestQueue) {
-      pending.emitter.emit(
-        "error",
-        Object.assign(new Error(message), { statusCode, retryAfter: 3 })
-      );
+      if (pending.emitter.listenerCount("error") > 0) {
+        pending.emitter.emit(
+          "error",
+          Object.assign(new Error(message), { statusCode, retryAfter: 3 })
+        );
+      }
     }
     sentinel.requestQueue = [];
   }
 
   private rejectProcessQueue(proc: PooledProcess): void {
     for (const pending of proc.requestQueue) {
-      pending.emitter.emit(
-        "error",
-        Object.assign(new Error("Process unavailable"), {
-          statusCode: 503,
-          retryAfter: 3,
-        })
-      );
+      if (pending.emitter.listenerCount("error") > 0) {
+        pending.emitter.emit(
+          "error",
+          Object.assign(new Error("Process unavailable"), {
+            statusCode: 503,
+            retryAfter: 3,
+          })
+        );
+      }
     }
     proc.requestQueue = [];
   }
@@ -920,7 +932,7 @@ export class SessionPoolRouter {
 
     this.clearRequestTimeout(pooled);
 
-    if (pooled.currentEmitter) {
+    if (pooled.currentEmitter && pooled.currentEmitter.listenerCount("error") > 0) {
       try {
         pooled.currentEmitter.emit(
           "error",
@@ -1133,7 +1145,7 @@ export class SessionPoolRouter {
     const kills: Promise<void>[] = [];
     for (const pooled of this.allProcesses.values()) {
       this.clearRequestTimeout(pooled);
-      if (pooled.currentEmitter) {
+      if (pooled.currentEmitter && pooled.currentEmitter.listenerCount("error") > 0) {
         pooled.currentEmitter.emit(
           "error",
           new Error("Server shutting down")
