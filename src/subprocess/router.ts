@@ -211,9 +211,13 @@ export class SessionPoolRouter {
   ): ExecuteResult | null {
     if (this.shuttingDown) {
       const emitter = new EventEmitter();
-      process.nextTick(() =>
-        emitter.emit("error", new Error("Server is shutting down"))
-      );
+      process.nextTick(() => {
+        if (emitter.listenerCount("error") > 0) {
+          emitter.emit("error", new Error("Server is shutting down"));
+        } else {
+          console.error(`[Router] Suppressed shutdown error (no listeners)`);
+        }
+      });
       return { emitter, routeType: "fallback", pid: null, queueDepth: 0 };
     }
 
@@ -315,7 +319,11 @@ export class SessionPoolRouter {
         );
         this.rejectSentinelQueue(sentinel, 503, "Cold spawn failed");
         this.clearSessionLock(sessionKey, null);
-        emitter.emit("error", new Error(`Cold spawn failed: ${err}`));
+        if (emitter.listenerCount("error") > 0) {
+          emitter.emit("error", new Error(`Cold spawn failed: ${err}`));
+        } else {
+          console.error(`[Router] Suppressed cold spawn error (no listeners):`, err.message);
+        }
       });
 
     return {
