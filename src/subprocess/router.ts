@@ -12,41 +12,42 @@ import { spawn, ChildProcess } from "child_process";
 import { EventEmitter } from "events";
 
 /**
- * Attaches a permanent no-op error listener so the emitter never reaches a
- * zero-listener state.  Prevents Node's default throw behavior when callers
- * detach their listeners before an async error fires.
+ * Factory that creates an EventEmitter with a permanent no-op error listener
+ * so it never reaches a zero-listener state.  Prevents Node's default throw
+ * behavior when callers detach their listeners before an async error fires.
  * Uses a simple counter instead of listenerCount() to avoid zombie emitter crashes.
  */
-function safeEmitter<T extends EventEmitter>(emitter: T): T {
+function safeEmitter(): EventEmitter {
+  const emitter = new EventEmitter();
   let activeListeners = 0;
-  
+
   // Track when listeners are added/removed
   const originalOn = emitter.on.bind(emitter);
   const originalOff = emitter.off.bind(emitter);
   const originalRemoveListener = emitter.removeListener.bind(emitter);
-  
+
   emitter.on = function(type: string, listener: (...args: any[]) => void) {
     if (type === "error") activeListeners++;
     return originalOn(type, listener);
   };
-  
+
   emitter.off = function(type: string, listener: (...args: any[]) => void) {
     if (type === "error") activeListeners = Math.max(0, activeListeners - 1);
     return originalOff(type, listener);
   };
-  
+
   emitter.removeListener = function(type: string, listener: (...args: any[]) => void) {
     if (type === "error") activeListeners = Math.max(0, activeListeners - 1);
     return originalRemoveListener(type, listener);
   };
-  
+
   // Permanent guard listener that logs if no other listeners
   emitter.prependListener("error", function safeEmitGuard(err: Error) {
     if (activeListeners <= 1) { // Only our guard listener
       console.error("[Router] Suppressed error (no active listeners):", err.message);
     }
   });
-  
+
   return emitter;
 }
 
@@ -250,7 +251,7 @@ export class SessionPoolRouter {
     sessionKey: string
   ): ExecuteResult | null {
     if (this.shuttingDown) {
-      const emitter = safeEmitter(new EventEmitter());
+      const emitter = safeEmitter();
       process.nextTick(() => {
         try {
           emitter.emit("error", new Error("Server is shutting down"));
@@ -336,7 +337,7 @@ export class SessionPoolRouter {
     }
 
     // Cold spawn (async)
-    const emitter = safeEmitter(new EventEmitter());
+    const emitter = safeEmitter();
     this.totalRequests++;
     this.routeHits.cold++;
 
@@ -571,7 +572,7 @@ export class SessionPoolRouter {
     prompt: string,
     routeType: "locked" | "warm" | "cold"
   ): ExecuteResult {
-    const emitter = safeEmitter(new EventEmitter());
+    const emitter = safeEmitter();
     this.assignToProcess(proc, prompt, emitter);
     return {
       emitter,
@@ -736,7 +737,7 @@ export class SessionPoolRouter {
     }
 
     if (proc.requestQueue.length >= this.config.requestQueueDepth) {
-      const emitter = safeEmitter(new EventEmitter());
+      const emitter = safeEmitter();
       process.nextTick(() =>
         emitter.emit(
           "error",
@@ -754,7 +755,7 @@ export class SessionPoolRouter {
       };
     }
 
-    const emitter = safeEmitter(new EventEmitter());
+    const emitter = safeEmitter();
     const pending: PendingRequest = {
       prompt,
       emitter,
@@ -777,7 +778,7 @@ export class SessionPoolRouter {
     _sessionKey: string
   ): ExecuteResult | null {
     if (sentinel.requestQueue.length >= this.config.requestQueueDepth) {
-      const emitter = safeEmitter(new EventEmitter());
+      const emitter = safeEmitter();
       process.nextTick(() =>
         emitter.emit(
           "error",
@@ -795,7 +796,7 @@ export class SessionPoolRouter {
       };
     }
 
-    const emitter = safeEmitter(new EventEmitter());
+    const emitter = safeEmitter();
     sentinel.requestQueue.push({ prompt, emitter, resolve: () => {} });
 
     return {
