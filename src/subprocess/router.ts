@@ -27,6 +27,17 @@ function safeEmitter(): EventEmitter {
   return emitter;
 }
 
+function safeListenerCount(emitter: EventEmitter, event: string): number {
+  try {
+    return emitter.listenerCount(event);
+  } catch (err) {
+    // Emitter is corrupted — treat as zero listeners
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`[Router] Emitter corrupted in listenerCount("${event}"):`, errMsg);
+    return 0;
+  }
+}
+
 import type {
   ClaudeCliMessage,
   ClaudeCliStreamEvent,
@@ -462,11 +473,15 @@ export class SessionPoolRouter {
 
     child.on("error", (err) => {
       console.error(`[Router:${id}] Process error:`, err.message);
-      if (pooled.currentEmitter && pooled.currentEmitter.listenerCount("error") > 0) {
-        try {
-          pooled.currentEmitter.emit("error", err);
-        } catch (emitErr) {
-          console.error(`[Router] Failed to emit process error:`, (emitErr as Error).message);
+      if (pooled.currentEmitter) {
+        if (safeListenerCount(pooled.currentEmitter, "error") > 0) {
+          try {
+            pooled.currentEmitter.emit("error", err);
+          } catch (emitErr) {
+            console.error(`[Router] Failed to emit process error:`, (emitErr as Error).message);
+          }
+        } else {
+          console.error(`[Router:${id}] Suppressed process error (no listeners):`, err.message);
         }
         pooled.currentEmitter = null;
       }
@@ -667,13 +682,17 @@ export class SessionPoolRouter {
       );
       this.requestTimeouts++;
 
-      if (pooled.currentEmitter && pooled.currentEmitter.listenerCount("error") > 0) {
-        pooled.currentEmitter.emit(
-          "error",
-          new Error(
-            `Request timed out after ${this.config.requestTimeoutMs}ms`
-          )
-        );
+      if (pooled.currentEmitter) {
+        if (safeListenerCount(pooled.currentEmitter, "error") > 0) {
+          pooled.currentEmitter.emit(
+            "error",
+            new Error(
+              `Request timed out after ${this.config.requestTimeoutMs}ms`
+            )
+          );
+        } else {
+          console.error(`[Router:${pooled.id}] Suppressed error (no listeners): Request timed out after ${this.config.requestTimeoutMs}ms`);
+        }
         pooled.currentEmitter = null;
       }
 

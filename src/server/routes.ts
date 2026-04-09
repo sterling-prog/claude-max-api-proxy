@@ -172,15 +172,7 @@ async function handlePooledStreaming(
     let isComplete = false;
     let hasEmittedText = false;
 
-    // Client disconnect: detach emitter, let process finish, return to locked-idle
-    res.on("close", () => {
-      if (!isComplete) {
-        emitter.removeAllListeners();
-      }
-      resolve();
-    });
-
-    emitter.on("text_block_start", () => {
+    const onTextBlockStart = () => {
       if (hasEmittedText && !res.writableEnded) {
         const sepChunk = {
           id: `chatcmpl-${requestId}`,
@@ -193,9 +185,9 @@ async function handlePooledStreaming(
         };
         res.write(`data: ${JSON.stringify(sepChunk)}\n\n`);
       }
-    });
+    };
 
-    emitter.on("content_delta", (event: ClaudeCliStreamEvent) => {
+    const onContentDelta = (event: ClaudeCliStreamEvent) => {
       const delta = event.event.delta;
       const text = (delta?.type === "text_delta" && delta.text) || "";
       if (text && !res.writableEnded) {
@@ -219,13 +211,13 @@ async function handlePooledStreaming(
         isFirst = false;
         hasEmittedText = true;
       }
-    });
+    };
 
-    emitter.on("assistant", (message: ClaudeCliAssistant) => {
+    const onAssistant = (message: ClaudeCliAssistant) => {
       lastModel = message.message.model;
-    });
+    };
 
-    emitter.on("result", (result: ClaudeCliResult) => {
+    const onResult = (result: ClaudeCliResult) => {
       isComplete = true;
       const latencyMs = Date.now() - startTime;
       console.log(
@@ -260,9 +252,9 @@ async function handlePooledStreaming(
         res.end();
       }
       resolve();
-    });
+    };
 
-    emitter.on("error", (error: Error) => {
+    const onError = (error: Error) => {
       isComplete = true;
       const latencyMs = Date.now() - startTime;
       const errWithStatus = error as Error & {
@@ -308,7 +300,26 @@ async function handlePooledStreaming(
         res.end();
       }
       resolve();
+    };
+
+    // Client disconnect: remove only request-specific listeners,
+    // preserving safeEmitter()'s permanent error listener
+    res.on("close", () => {
+      if (!isComplete) {
+        emitter.removeListener("text_block_start", onTextBlockStart);
+        emitter.removeListener("content_delta", onContentDelta);
+        emitter.removeListener("assistant", onAssistant);
+        emitter.removeListener("result", onResult);
+        emitter.removeListener("error", onError);
+      }
+      resolve();
     });
+
+    emitter.on("text_block_start", onTextBlockStart);
+    emitter.on("content_delta", onContentDelta);
+    emitter.on("assistant", onAssistant);
+    emitter.on("result", onResult);
+    emitter.on("error", onError);
   });
 }
 
