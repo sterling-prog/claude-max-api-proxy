@@ -125,7 +125,8 @@ export interface PooledProcess {
 }
 
 export interface PendingRequest {
-  prompt: string;
+  fullPrompt: string;
+  latestPrompt: string;
   emitter: EventEmitter;
   resolve: () => void;
 }
@@ -234,6 +235,7 @@ export class SessionPoolRouter {
 
   execute(
     prompt: string,
+    latestPrompt: string,
     model: ClaudeModel,
     sessionKey: string
   ): ExecuteResult | null {
@@ -277,16 +279,16 @@ export class SessionPoolRouter {
 
     if (existing) {
       if (isPendingSentinel(existing)) {
-        return this.enqueueOnSentinel(existing, prompt, sessionKey);
+        return this.enqueueOnSentinel(existing, prompt, latestPrompt, sessionKey);
       }
 
       const proc = existing;
       if (proc.state === "idle") {
         this.routeHits.locked++;
         this.totalRequests++;
-        return this.routeToProcess(proc, prompt, "locked");
+        return this.routeToProcess(proc, prompt, latestPrompt, "locked");
       } else {
-        return this.enqueueOnProcess(proc, prompt, sessionKey);
+        return this.enqueueOnProcess(proc, prompt, latestPrompt, sessionKey);
       }
     }
 
@@ -304,7 +306,7 @@ export class SessionPoolRouter {
       this.lockedSessions.set(sessionKey, proc);
       this.routeHits.warm++;
       this.totalRequests++;
-      return this.routeToProcess(proc, prompt, "warm");
+      return this.routeToProcess(proc, prompt, latestPrompt, "warm");
     }
 
     // Warm pool empty — need cold spawn
@@ -335,7 +337,7 @@ export class SessionPoolRouter {
         this.lockProcess(proc, sessionKey, agentChannel);
         this.transferSentinelQueue(sentinel, proc);
         this.lockedSessions.set(sessionKey, proc);
-        this.assignToProcess(proc, prompt, emitter);
+        this.assignToProcess(proc, prompt, latestPrompt, emitter);
       })
       .catch((err) => {
         console.log(
@@ -565,10 +567,11 @@ export class SessionPoolRouter {
   private routeToProcess(
     proc: PooledProcess,
     prompt: string,
+    latestPrompt: string,
     routeType: "locked" | "warm" | "cold"
   ): ExecuteResult {
     const emitter = safeEmitter();
-    this.assignToProcess(proc, prompt, emitter);
+    this.assignToProcess(proc, prompt, latestPrompt, emitter);
     return {
       emitter,
       routeType,
@@ -579,10 +582,14 @@ export class SessionPoolRouter {
 
   private assignToProcess(
     pooled: PooledProcess,
-    prompt: string,
+    fullPrompt: string,
+    latestPrompt: string,
     emitter: EventEmitter
   ): void {
     pooled.state = "busy";
+    // Select prompt BEFORE incrementing requestCount.
+    // Guard: if latestPrompt is empty (no user message in array), fall back to fullPrompt.
+    const prompt = (pooled.requestCount === 0 || !latestPrompt) ? fullPrompt : latestPrompt;
     pooled.requestCount++;
     pooled.lastRequestAt = Date.now();
     pooled.currentEmitter = emitter;
@@ -689,7 +696,7 @@ export class SessionPoolRouter {
 
     const next = pooled.requestQueue.shift()!;
     this.totalRequests++;
-    this.assignToProcess(pooled, next.prompt, next.emitter);
+    this.assignToProcess(pooled, next.fullPrompt, next.latestPrompt, next.emitter);
     next.resolve();
   }
 
@@ -749,7 +756,8 @@ export class SessionPoolRouter {
 
   private enqueueOnProcess(
     proc: PooledProcess,
-    prompt: string,
+    fullPrompt: string,
+    latestPrompt: string,
     sessionKey: string
   ): ExecuteResult | null {
     if (proc.state === "recycling") {
@@ -788,7 +796,8 @@ export class SessionPoolRouter {
 
     const emitter = safeEmitter();
     const pending: PendingRequest = {
-      prompt,
+      fullPrompt,
+      latestPrompt,
       emitter,
       resolve: () => {},
     };
@@ -805,7 +814,8 @@ export class SessionPoolRouter {
 
   private enqueueOnSentinel(
     sentinel: PendingSentinel,
-    prompt: string,
+    fullPrompt: string,
+    latestPrompt: string,
     _sessionKey: string
   ): ExecuteResult | null {
     if (sentinel.requestQueue.length >= this.config.requestQueueDepth) {
@@ -830,7 +840,7 @@ export class SessionPoolRouter {
     }
 
     const emitter = safeEmitter();
-    sentinel.requestQueue.push({ prompt, emitter, resolve: () => {} });
+    sentinel.requestQueue.push({ fullPrompt, latestPrompt, emitter, resolve: () => {} });
 
     return {
       emitter,

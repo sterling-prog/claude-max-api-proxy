@@ -88,6 +88,7 @@ export async function handleChatCompletions(
     if (sessionKey && poolRouter) {
       const result = poolRouter.execute(
         cliInput.prompt,
+        cliInput.latestPrompt,
         cliInput.model,
         sessionKey
       );
