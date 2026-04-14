@@ -281,6 +281,10 @@ async function handlePooledStreaming(
 
     const onError = (error: Error) => {
       isComplete = true;
+      emitter.removeListener("text_block_start", onTextBlockStart);
+      emitter.removeListener("content_delta", onContentDelta);
+      emitter.removeListener("assistant", onAssistant);
+      emitter.removeListener("result", onResult);
       const latencyMs = Date.now() - startTime;
       const errWithStatus = error as Error & {
         statusCode?: number;

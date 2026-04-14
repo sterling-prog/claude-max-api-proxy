@@ -62,7 +62,11 @@ function extractText(content: string | OpenAIContentBlock[]): string {
   }
   if (Array.isArray(content)) {
     return content
-      .filter((block) => block.type === "text" || block.type === "input_text")
+      .filter(
+        (block) =>
+          (block.type === "text" || block.type === "input_text") &&
+          block.text != null
+      )
       .map((block) => block.text)
       .join("\n");
   }
