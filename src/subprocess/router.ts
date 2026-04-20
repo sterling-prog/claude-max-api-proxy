@@ -518,15 +518,15 @@ export class SessionPoolRouter {
           pid: pooled.process.pid,
           reason: "epipe",
         }));
+        const emitter = pooled.currentEmitter;
         if (lockedSessionKey) {
           this.clearSessionLock(lockedSessionKey, pooled);
         }
         this.killAndRespawn(pooled);
         this.processRecycles++;
         this.livenessEvictions++;
-        if (pooled.currentEmitter) {
-          pooled.currentEmitter.emit("error", err);
-          pooled.currentEmitter = null;
+        if (emitter) {
+          emitter.emit("error", err);
         }
         return;
       }
