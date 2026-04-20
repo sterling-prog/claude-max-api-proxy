@@ -522,7 +522,12 @@ export class SessionPoolRouter {
           this.clearSessionLock(lockedSessionKey, pooled);
         }
         this.killAndRespawn(pooled);
+        this.processRecycles++;
         this.livenessEvictions++;
+        if (pooled.currentEmitter) {
+          pooled.currentEmitter.emit("error", err);
+          pooled.currentEmitter = null;
+        }
         return;
       }
       console.error(`[Router:${id}] Process error:`, err.message);
