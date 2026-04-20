@@ -102,6 +102,7 @@ export interface PooledProcess {
   lockedTo: string | null;
   agentChannel: string | null;
   lastRequestAt: number;
+  lastResultAt: number;
   spawnedAt: number;
   requestCount: number;
   lastMessageCount: number;
@@ -152,6 +153,7 @@ export interface PoolStats {
   orphansReclaimed: number;
   totalRequests: number;
   processRecycles: number;
+  livenessEvictions: number;
   requestTimeouts: number;
   routeHits: { locked: number; warm: number; cold: number; fallback: number };
   uptime: number;
@@ -181,6 +183,7 @@ export class SessionPoolRouter {
   private orphansReclaimed = 0;
   private totalRequests = 0;
   private processRecycles = 0;
+  private livenessEvictions = 0;
   private requestTimeouts = 0;
   private routeHits = { locked: 0, warm: 0, cold: 0, fallback: 0 };
 
@@ -295,9 +298,33 @@ export class SessionPoolRouter {
         }
         // Fall through to warm/cold claim below
       } else if (proc.state === "idle") {
-        this.routeHits.locked++;
-        this.totalRequests++;
-        return this.routeToProcess(proc, prompt, latestPrompt, "locked", messageCount);
+        // Liveness gate: evict locked pid if process is dead/broken
+        const isAlive =
+          proc.process.exitCode === null &&
+          proc.process.killed === false &&
+          proc.process.stdin?.writable === true;
+        if (!isAlive) {
+          const reason =
+            proc.process.exitCode !== null ? "exit_code" :
+            proc.process.killed ? "killed" : "stdin_closed";
+          console.log(JSON.stringify({
+            ts: new Date().toISOString(),
+            event: "liveness_gate_evict",
+            sessionKey,
+            processId: proc.id,
+            pid: proc.process.pid,
+            reason,
+          }));
+          this.clearSessionLock(sessionKey, proc);
+          this.killAndRespawn(proc);
+          this.processRecycles++;
+          this.livenessEvictions++;
+          // Fall through to new-session warm/cold claim below
+        } else {
+          this.routeHits.locked++;
+          this.totalRequests++;
+          return this.routeToProcess(proc, prompt, latestPrompt, "locked", messageCount);
+        }
       } else {
         return this.enqueueOnProcess(proc, prompt, latestPrompt, sessionKey, messageCount);
       }
@@ -436,6 +463,7 @@ export class SessionPoolRouter {
       lockedTo: null,
       agentChannel: null,
       lastRequestAt: 0,
+      lastResultAt: 0,
       spawnedAt: Date.now(),
       requestCount: 0,
       lastMessageCount: 0,
@@ -479,7 +507,29 @@ export class SessionPoolRouter {
       this.handleProcessDeath(pooled, code);
     });
 
-    child.on("error", (err) => {
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EPIPE" || pooled.process.stdin?.destroyed === true) {
+        const lockedSessionKey = pooled.lockedTo;
+        console.log(JSON.stringify({
+          ts: new Date().toISOString(),
+          event: "liveness_gate_evict",
+          sessionKey: lockedSessionKey,
+          processId: pooled.id,
+          pid: pooled.process.pid,
+          reason: "epipe",
+        }));
+        const emitter = pooled.currentEmitter;
+        if (lockedSessionKey) {
+          this.clearSessionLock(lockedSessionKey, pooled);
+        }
+        this.killAndRespawn(pooled);
+        this.processRecycles++;
+        this.livenessEvictions++;
+        if (emitter) {
+          emitter.emit("error", err);
+        }
+        return;
+      }
       console.error(`[Router:${id}] Process error:`, err.message);
       if (pooled.currentEmitter) {
         pooled.currentEmitter.emit("error", err);
@@ -636,6 +686,7 @@ export class SessionPoolRouter {
 
   private releaseProcess(pooled: PooledProcess): void {
     this.clearRequestTimeout(pooled);
+    pooled.lastResultAt = Date.now();
     pooled.currentEmitter = null;
 
     // Orphan check
@@ -1011,6 +1062,7 @@ export class SessionPoolRouter {
   }
 
   private killAndRespawn(pooled: PooledProcess): void {
+    if (!this.allProcesses.has(pooled.id)) return;
     this.clearRequestTimeout(pooled);
     pooled.currentEmitter = null;
 
@@ -1161,6 +1213,7 @@ export class SessionPoolRouter {
       orphansReclaimed: this.orphansReclaimed,
       totalRequests: this.totalRequests,
       processRecycles: this.processRecycles,
+      livenessEvictions: this.livenessEvictions,
       requestTimeouts: this.requestTimeouts,
       routeHits: { ...this.routeHits },
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
@@ -1219,5 +1272,17 @@ export class SessionPoolRouter {
     this.warmPool.set("opus", []);
     this.warmPool.set("sonnet", []);
     console.log("[Router] Shutdown complete.");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test hooks (not for production use)
+  // ---------------------------------------------------------------------------
+
+  /** Forcibly destroy the stdin of the process locked to sessionKey.
+   *  Used in integration tests to simulate a dead/broken stdin. */
+  __testing_forceStdinClose(sessionKey: string): void {
+    const entry = this.lockedSessions.get(sessionKey);
+    if (!entry || isPendingSentinel(entry)) return;
+    entry.process.stdin?.destroy();
   }
 }
