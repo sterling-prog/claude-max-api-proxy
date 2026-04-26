@@ -394,7 +394,7 @@ async function handlePooledNonStreaming(
           requestCount: result.num_turns,
         })
       );
-      res.json(cliResultToOpenai(result, requestId));
+      res.json(cliResultToOpenai(result, requestId, undefined, model));
       resolve();
     });
 
@@ -615,7 +615,9 @@ async function handleNonStreamingResponse(
 
     subprocess.on("close", (code: number | null) => {
       if (finalResult) {
-        res.json(cliResultToOpenai(finalResult, requestId));
+        res.json(
+          cliResultToOpenai(finalResult, requestId, undefined, cliInput.model)
+        );
       } else if (!res.headersSent) {
         res.status(500).json({
           error: {
