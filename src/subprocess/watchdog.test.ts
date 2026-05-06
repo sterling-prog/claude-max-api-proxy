@@ -68,27 +68,34 @@ describe("output watchdog", () => {
     });
   });
 
-  it("stdout activity resets the watchdog — no eviction if output arrives before deadline", (_, done) => {
+  it("stdout activity resets the deadline — no eviction before new window, eviction after", (_, done) => {
     mock.timers.enable({ apis: ["setTimeout"], now: Date.now() });
 
     const router = new SessionPoolRouter({ opusSize: 0, sonnetSize: 0, maxTotalProcesses: 0 });
     const emitter = router.__testing_armWatchdog("reset-session");
 
-    const errors: Error[] = [];
-    emitter.on("error", (err: Error) => errors.push(err));
+    const errors: Array<Error & { statusCode?: number }> = [];
+    emitter.on("error", (err: Error & { statusCode?: number }) => errors.push(err));
 
-    // Advance to 400ms — within the 500ms window, no eviction yet
-    mock.timers.tick(400);
-    // Simulate stdout chunk: resets the timer to another 500ms from now
-    router.__testing_resetWatchdog("reset-session");
-    // Advance 400ms more — 800ms total, but only 400ms since the reset; still within window
-    mock.timers.tick(400);
+    // t=300ms: emit stdout chunk via the real stdout.on("data") path — resets the 500ms window
+    mock.timers.tick(300);
+    router.__testing_emitStdout("reset-session");
 
+    // t=600ms: past original 500ms deadline, but only 300ms since reset — no eviction yet
+    mock.timers.tick(300);
     setImmediate(() => {
-      assert.strictEqual(errors.length, 0, "no eviction within the reset window");
+      assert.strictEqual(errors.length, 0, "no eviction at t=600ms (within reset window)");
       assert.strictEqual(router.stats().watchdogEvictions, 0);
-      mock.timers.reset();
-      done();
+
+      // t=1000ms: 400ms past the reset deadline (500ms after reset at t=300ms) — eviction fires
+      mock.timers.tick(400);
+      setImmediate(() => {
+        assert.strictEqual(errors.length, 1, "eviction fires after reset window expires");
+        assert.strictEqual(errors[0].statusCode, 503, "eviction error must be 503");
+        assert.strictEqual(router.stats().watchdogEvictions, 1, "counter increments");
+        mock.timers.reset();
+        done();
+      });
     });
   });
 });

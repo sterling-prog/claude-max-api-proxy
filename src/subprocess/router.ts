@@ -1344,12 +1344,15 @@ export class SessionPoolRouter {
   }
 
   /** Inject a fake busy proc and arm its watchdog. Returns the emitter so the
-   *  caller can listen for the eviction error. Used in watchdog unit tests. */
+   *  caller can listen for the eviction error. Used in watchdog unit tests.
+   *  The fake proc has a real EventEmitter as stdout so __testing_emitStdout
+   *  goes through the actual stdout.on("data") → resetWatchdog code path. */
   __testing_armWatchdog(sessionKey: string): EventEmitter {
     const emitter = safeEmitter();
+    const fakeStdout = new EventEmitter();
     const fakeProc: PooledProcess = {
       id: -(++this.nextId),
-      process: { stdin: null, pid: -1, kill: () => true } as unknown as import("child_process").ChildProcess,
+      process: { stdin: null, stdout: fakeStdout, pid: -1, kill: () => true } as unknown as import("child_process").ChildProcess,
       model: "sonnet",
       lockedTo: sessionKey,
       agentChannel: null,
@@ -1367,16 +1370,22 @@ export class SessionPoolRouter {
       watchdogTimer: null,
       orphaned: false,
     };
+    fakeStdout.on("data", (chunk: Buffer) => {
+      fakeProc.buffer += chunk.toString();
+      this.resetWatchdog(fakeProc);
+      this.processBuffer(fakeProc);
+    });
     this.allProcesses.set(fakeProc.id, fakeProc);
     this.lockedSessions.set(sessionKey, fakeProc);
     this.startWatchdog(fakeProc);
     return emitter;
   }
 
-  /** Simulate a stdout chunk for a test-injected proc, triggering resetWatchdog. */
-  __testing_resetWatchdog(sessionKey: string): void {
+  /** Simulate a stdout data event on a test-injected proc.
+   *  Triggers the real stdout.on("data") → resetWatchdog path. */
+  __testing_emitStdout(sessionKey: string): void {
     const proc = this.lockedSessions.get(sessionKey);
     if (!proc || isPendingSentinel(proc)) return;
-    this.resetWatchdog(proc);
+    (proc.process.stdout as unknown as EventEmitter).emit("data", Buffer.from("chunk"));
   }
 }
