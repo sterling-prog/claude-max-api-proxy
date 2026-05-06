@@ -11,9 +11,7 @@ npm run dev      # Watch mode for development
 
 ## Service Management
 
-The proxy runs as a macOS LaunchAgent on port 3456.
-
-**Plist location:** `~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist`
+The proxy runs as a **PM2 process on Linux (gpu1)**, port 3456. Process name: `claude-max-api-proxy`.
 
 **Logs:**
 - stdout: `~/.openclaw/logs/claude-max-proxy.log`
@@ -22,32 +20,21 @@ The proxy runs as a macOS LaunchAgent on port 3456.
 ### Restart the service
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.openclaw.claude-max-proxy
+pm2 restart claude-max-api-proxy --update-env && pm2 save
 ```
 
-### Stop the service
+### Stop / start
 
 ```bash
-launchctl bootout gui/$(id -u)/com.openclaw.claude-max-proxy
-```
-
-### Start the service (after stop or plist change)
-
-```bash
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist
-```
-
-### Reload after plist changes
-
-```bash
-launchctl bootout gui/$(id -u)/com.openclaw.claude-max-proxy
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openclaw.claude-max-proxy.plist
+pm2 stop claude-max-api-proxy
+pm2 start claude-max-api-proxy
 ```
 
 ### Check status
 
 ```bash
-launchctl list com.openclaw.claude-max-proxy
+pm2 status claude-max-api-proxy
+pm2 logs claude-max-api-proxy --lines 50
 ```
 
 ## Architecture
@@ -86,5 +73,6 @@ POST /v1/chat/completions
 | POOL_MAX_REQUESTS_PER_PROCESS | 50 | Context accumulation threshold |
 | POOL_REQUEST_QUEUE_DEPTH | 3 | Per-process queue depth before 429 |
 | POOL_REQUEST_TIMEOUT_MS | 300000 | Per-request timeout (5 min) |
+| POOL_WATCHDOG_TIMEOUT_MS | 120000 | Kill proc if no stdout for this long while busy (2 min). Set to 0 to disable. |
 | SWEEP_IDLE_THRESHOLD_MS | 7200000 | Idle time before sweep recycles (2 hr) |
 | SWEEP_HOUR | 3 | Hour in ET for nightly sweep |
