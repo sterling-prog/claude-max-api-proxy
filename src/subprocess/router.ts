@@ -829,6 +829,7 @@ export class SessionPoolRouter {
       const emitter = pooled.currentEmitter;
       const sessionKey = pooled.lockedTo;
       pooled.currentEmitter = null;
+      this.rejectProcessQueue(pooled);
       if (sessionKey) this.clearSessionLock(sessionKey, pooled);
       if (emitter) {
         emitter.emit("error", Object.assign(
@@ -1370,5 +1371,12 @@ export class SessionPoolRouter {
     this.lockedSessions.set(sessionKey, fakeProc);
     this.startWatchdog(fakeProc);
     return emitter;
+  }
+
+  /** Simulate a stdout chunk for a test-injected proc, triggering resetWatchdog. */
+  __testing_resetWatchdog(sessionKey: string): void {
+    const proc = this.lockedSessions.get(sessionKey);
+    if (!proc || isPendingSentinel(proc)) return;
+    this.resetWatchdog(proc);
   }
 }

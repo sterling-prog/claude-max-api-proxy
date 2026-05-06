@@ -67,4 +67,28 @@ describe("output watchdog", () => {
       done();
     });
   });
+
+  it("stdout activity resets the watchdog — no eviction if output arrives before deadline", (_, done) => {
+    mock.timers.enable({ apis: ["setTimeout"], now: Date.now() });
+
+    const router = new SessionPoolRouter({ opusSize: 0, sonnetSize: 0, maxTotalProcesses: 0 });
+    const emitter = router.__testing_armWatchdog("reset-session");
+
+    const errors: Error[] = [];
+    emitter.on("error", (err: Error) => errors.push(err));
+
+    // Advance to 400ms — within the 500ms window, no eviction yet
+    mock.timers.tick(400);
+    // Simulate stdout chunk: resets the timer to another 500ms from now
+    router.__testing_resetWatchdog("reset-session");
+    // Advance 400ms more — 800ms total, but only 400ms since the reset; still within window
+    mock.timers.tick(400);
+
+    setImmediate(() => {
+      assert.strictEqual(errors.length, 0, "no eviction within the reset window");
+      assert.strictEqual(router.stats().watchdogEvictions, 0);
+      mock.timers.reset();
+      done();
+    });
+  });
 });
