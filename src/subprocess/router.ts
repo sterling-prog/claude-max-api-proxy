@@ -112,6 +112,7 @@ export interface PooledProcess {
   currentEmitter: EventEmitter | null;
   ready: boolean;
   requestTimeoutTimer: NodeJS.Timeout | null;
+  watchdogTimer: NodeJS.Timeout | null;
   orphaned: boolean;
 }
 
@@ -155,6 +156,7 @@ export interface PoolStats {
   processRecycles: number;
   livenessEvictions: number;
   requestTimeouts: number;
+  watchdogEvictions: number;
   routeHits: { locked: number; warm: number; cold: number; fallback: number };
   uptime: number;
 }
@@ -185,6 +187,8 @@ export class SessionPoolRouter {
   private processRecycles = 0;
   private livenessEvictions = 0;
   private requestTimeouts = 0;
+  private watchdogEvictions = 0;
+  private watchdogTimeoutMs: number;
   private routeHits = { locked: 0, warm: 0, cold: 0, fallback: 0 };
 
   constructor(config: Partial<PoolRouterConfig> = {}) {
@@ -197,6 +201,7 @@ export class SessionPoolRouter {
       requestTimeoutMs: config.requestTimeoutMs ?? 300000,
       sweepIdleThresholdMs: config.sweepIdleThresholdMs ?? 7200000,
     };
+    this.watchdogTimeoutMs = parseInt(process.env.POOL_WATCHDOG_TIMEOUT_MS ?? "120000", 10);
     this.warmPool.set("opus", []);
     this.warmPool.set("sonnet", []);
   }
@@ -473,6 +478,7 @@ export class SessionPoolRouter {
       currentEmitter: null,
       ready: false,
       requestTimeoutTimer: null,
+      watchdogTimer: null,
       orphaned: false,
     };
 
@@ -480,6 +486,7 @@ export class SessionPoolRouter {
 
     child.stdout?.on("data", (chunk: Buffer) => {
       pooled.buffer += chunk.toString();
+      this.resetWatchdog(pooled);
       this.processBuffer(pooled);
     });
 
@@ -652,6 +659,7 @@ export class SessionPoolRouter {
     pooled.process.stdin?.write(message + "\n");
 
     this.startRequestTimeout(pooled);
+    this.startWatchdog(pooled);
   }
 
   /**
@@ -686,6 +694,7 @@ export class SessionPoolRouter {
 
   private releaseProcess(pooled: PooledProcess): void {
     this.clearRequestTimeout(pooled);
+    this.clearWatchdog(pooled);
     pooled.lastResultAt = Date.now();
     pooled.currentEmitter = null;
 
@@ -795,6 +804,51 @@ export class SessionPoolRouter {
       clearTimeout(pooled.requestTimeoutTimer);
       pooled.requestTimeoutTimer = null;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Output watchdog
+  // -------------------------------------------------------------------------
+
+  private startWatchdog(pooled: PooledProcess): void {
+    this.clearWatchdog(pooled);
+    if (this.watchdogTimeoutMs <= 0) return;
+    const startedAt = Date.now();
+    pooled.watchdogTimer = setTimeout(() => {
+      const silentMs = Date.now() - startedAt;
+      console.log(JSON.stringify({
+        ts: new Date().toISOString(),
+        event: "watchdog_evict",
+        processId: pooled.id,
+        pid: pooled.process.pid,
+        sessionKey: pooled.lockedTo,
+        silentMs,
+        requestCount: pooled.requestCount,
+      }));
+      this.watchdogEvictions++;
+      const emitter = pooled.currentEmitter;
+      const sessionKey = pooled.lockedTo;
+      pooled.currentEmitter = null;
+      if (sessionKey) this.clearSessionLock(sessionKey, pooled);
+      if (emitter) {
+        emitter.emit("error", Object.assign(
+          new Error(`Watchdog: no stdout for ${silentMs}ms`),
+          { statusCode: 503 }
+        ));
+      }
+      this.killAndRespawn(pooled);
+    }, this.watchdogTimeoutMs);
+  }
+
+  private clearWatchdog(pooled: PooledProcess): void {
+    if (pooled.watchdogTimer) {
+      clearTimeout(pooled.watchdogTimer);
+      pooled.watchdogTimer = null;
+    }
+  }
+
+  private resetWatchdog(pooled: PooledProcess): void {
+    if (pooled.watchdogTimer !== null) this.startWatchdog(pooled);
   }
 
   // -------------------------------------------------------------------------
@@ -1064,6 +1118,7 @@ export class SessionPoolRouter {
   private killAndRespawn(pooled: PooledProcess): void {
     if (!this.allProcesses.has(pooled.id)) return;
     this.clearRequestTimeout(pooled);
+    this.clearWatchdog(pooled);
     pooled.currentEmitter = null;
 
     // Remove from allProcesses BEFORE kill to prevent double-handling
@@ -1215,6 +1270,7 @@ export class SessionPoolRouter {
       processRecycles: this.processRecycles,
       livenessEvictions: this.livenessEvictions,
       requestTimeouts: this.requestTimeouts,
+      watchdogEvictions: this.watchdogEvictions,
       routeHits: { ...this.routeHits },
       uptime: Math.floor((Date.now() - this.startedAt) / 1000),
     };
@@ -1284,5 +1340,35 @@ export class SessionPoolRouter {
     const entry = this.lockedSessions.get(sessionKey);
     if (!entry || isPendingSentinel(entry)) return;
     entry.process.stdin?.destroy();
+  }
+
+  /** Inject a fake busy proc and arm its watchdog. Returns the emitter so the
+   *  caller can listen for the eviction error. Used in watchdog unit tests. */
+  __testing_armWatchdog(sessionKey: string): EventEmitter {
+    const emitter = safeEmitter();
+    const fakeProc: PooledProcess = {
+      id: -(++this.nextId),
+      process: { stdin: null, pid: -1, kill: () => true } as unknown as import("child_process").ChildProcess,
+      model: "sonnet",
+      lockedTo: sessionKey,
+      agentChannel: null,
+      lastRequestAt: Date.now(),
+      lastResultAt: 0,
+      spawnedAt: Date.now(),
+      requestCount: 1,
+      lastMessageCount: 0,
+      state: "busy",
+      requestQueue: [],
+      buffer: "",
+      currentEmitter: emitter,
+      ready: true,
+      requestTimeoutTimer: null,
+      watchdogTimer: null,
+      orphaned: false,
+    };
+    this.allProcesses.set(fakeProc.id, fakeProc);
+    this.lockedSessions.set(sessionKey, fakeProc);
+    this.startWatchdog(fakeProc);
+    return emitter;
   }
 }
