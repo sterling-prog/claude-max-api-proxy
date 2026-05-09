@@ -64,16 +64,21 @@ export function createDoneChunk(requestId: string, model: string): OpenAIChatChu
 
 /**
  * Convert Claude CLI result to OpenAI non-streaming response
+ *
+ * `requestedModel` (when provided) is echoed back as `response.model`,
+ * matching OpenAI's contract that the response model reflects the request.
+ * When omitted, falls back to picking the highest-output-tokens entry from
+ * `modelUsage` — `Object.keys(...)[0]` is unreliable because the CLI's
+ * `modelUsage` map can include internal tool-routing models (typically
+ * Haiku) alongside the primary assistant model.
  */
 export function cliResultToOpenai(
   result: ClaudeCliResult,
   requestId: string,
-  toolCalls?: OpenAIToolCall[]
+  toolCalls?: OpenAIToolCall[],
+  requestedModel?: string
 ): OpenAIChatResponse {
-  // Get model from modelUsage or default
-  const modelName = result.modelUsage
-    ? Object.keys(result.modelUsage)[0]
-    : "claude-sonnet-4";
+  const modelName = requestedModel ?? pickPrimaryModel(result);
 
   const message: OpenAIChatResponse["choices"][0]["message"] = {
     role: "assistant",
@@ -103,6 +108,25 @@ export function cliResultToOpenai(
         (result.usage?.input_tokens || 0) + (result.usage?.output_tokens || 0),
     },
   };
+}
+
+/**
+ * Pick the model that produced the user-visible response from `modelUsage`.
+ * The CLI may invoke internal helpers (typically Haiku) alongside the primary
+ * assistant model; selecting by max output_tokens reliably picks the primary.
+ */
+function pickPrimaryModel(result: ClaudeCliResult): string {
+  if (!result.modelUsage) return "claude-sonnet-4";
+  let bestKey = "";
+  let bestTokens = -1;
+  for (const [key, usage] of Object.entries(result.modelUsage)) {
+    const tokens = usage?.outputTokens ?? 0;
+    if (tokens > bestTokens) {
+      bestTokens = tokens;
+      bestKey = key;
+    }
+  }
+  return bestKey || "claude-sonnet-4";
 }
 
 /**
