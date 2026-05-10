@@ -73,6 +73,6 @@ POST /v1/chat/completions
 | POOL_MAX_REQUESTS_PER_PROCESS | 50 | Context accumulation threshold |
 | POOL_REQUEST_QUEUE_DEPTH | 3 | Per-process queue depth before 429 |
 | POOL_REQUEST_TIMEOUT_MS | 300000 | Per-request timeout (5 min) |
-| POOL_WATCHDOG_TIMEOUT_MS | 120000 | Kill proc if no stdout for this long while busy (2 min). Set to 0 to disable. |
+| POOL_STREAM_STALL_MS | 120000 | Kill proc if no stdout for this long while busy (2 min). Set to 0 to disable. |
 | SWEEP_IDLE_THRESHOLD_MS | 7200000 | Idle time before sweep recycles (2 hr) |
 | SWEEP_HOUR | 3 | Hour in ET for nightly sweep |

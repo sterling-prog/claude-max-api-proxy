@@ -14,11 +14,11 @@ import { SessionPoolRouter } from "./router.js";
 describe("output watchdog", () => {
   before(() => {
     // Short timeout so fake-clock ticks are small
-    process.env.POOL_WATCHDOG_TIMEOUT_MS = "500";
+    process.env.POOL_STREAM_STALL_MS = "500";
   });
 
   after(() => {
-    delete process.env.POOL_WATCHDOG_TIMEOUT_MS;
+    delete process.env.POOL_STREAM_STALL_MS;
     mock.timers.reset();
   });
 
@@ -29,11 +29,11 @@ describe("output watchdog", () => {
     assert.strictEqual(s.watchdogEvictions, 0);
   });
 
-  it("POOL_WATCHDOG_TIMEOUT_MS=0 disables watchdog — no eviction fires", (_, done) => {
-    const saved = process.env.POOL_WATCHDOG_TIMEOUT_MS;
-    process.env.POOL_WATCHDOG_TIMEOUT_MS = "0";
+  it("POOL_STREAM_STALL_MS=0 disables watchdog — no eviction fires", (_, done) => {
+    const saved = process.env.POOL_STREAM_STALL_MS;
+    process.env.POOL_STREAM_STALL_MS = "0";
     const router = new SessionPoolRouter({ opusSize: 0, sonnetSize: 0, maxTotalProcesses: 0 });
-    process.env.POOL_WATCHDOG_TIMEOUT_MS = saved!;
+    process.env.POOL_STREAM_STALL_MS = saved!;
 
     const emitter = router.__testing_armWatchdog("disabled-session");
     const errors: Error[] = [];

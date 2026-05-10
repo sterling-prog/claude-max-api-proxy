@@ -201,7 +201,7 @@ export class SessionPoolRouter {
       requestTimeoutMs: config.requestTimeoutMs ?? 300000,
       sweepIdleThresholdMs: config.sweepIdleThresholdMs ?? 7200000,
     };
-    this.watchdogTimeoutMs = parseInt(process.env.POOL_WATCHDOG_TIMEOUT_MS ?? "120000", 10);
+    this.watchdogTimeoutMs = parseInt(process.env.POOL_STREAM_STALL_MS ?? "120000", 10);
     this.warmPool.set("opus", []);
     this.warmPool.set("sonnet", []);
   }
