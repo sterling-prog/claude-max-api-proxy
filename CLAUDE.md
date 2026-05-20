@@ -63,6 +63,17 @@ POST /v1/chat/completions
     → ClaudeSubprocess (subprocess-per-request, original behavior)
 ```
 
+## Memory Telemetry
+
+A cron job runs every 15 minutes logging the proxy's RSS:
+
+- **Script:** `~/.openclaw/scripts/log-proxy-rss.sh`
+- **Log:** `~/.openclaw/logs/proxy-rss-trend.log`
+- **Format:** `2026-05-10T13:26:59Z rss=86949888` (bytes; ÷1048576 for MB)
+- **Tail:** `tail -f ~/.openclaw/logs/proxy-rss-trend.log`
+
+See `specs/P136-proxy-rss-trend-analysis.md` for the planned leak-detection analysis (trigger: 72h of data).
+
 ### Pool env vars
 
 | Var | Default | Description |
